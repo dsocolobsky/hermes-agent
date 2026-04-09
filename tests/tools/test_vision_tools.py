@@ -450,6 +450,11 @@ class TestVisionRequirements:
         (tmp_path / "auth.json").write_text(
             '{"active_provider":"openai-codex","providers":{"openai-codex":{"tokens":{"access_token":"codex-access-token","refresh_token":"codex-refresh-token"}}}}'
         )
+        # config.yaml must reference the codex provider so vision auto-detect
+        # falls back to the active provider via _read_main_provider().
+        (tmp_path / "config.yaml").write_text(
+            'model:\n  default: gpt-4o\n  provider: openai-codex\n'
+        )
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
