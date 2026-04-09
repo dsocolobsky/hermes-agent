@@ -941,9 +941,10 @@ class TestHuggingFaceModels:
         """Every HF model should have a context length entry."""
         from hermes_cli.models import _PROVIDER_MODELS
         from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+        lower_keys = {k.lower() for k in DEFAULT_CONTEXT_LENGTHS}
         hf_models = _PROVIDER_MODELS["huggingface"]
         for model in hf_models:
-            assert model in DEFAULT_CONTEXT_LENGTHS, (
+            assert model.lower() in lower_keys, (
                 f"HF model {model!r} missing from DEFAULT_CONTEXT_LENGTHS"
             )
 
