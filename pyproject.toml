@@ -87,6 +87,10 @@ rl = [
   "wandb>=0.15.0,<1",
 ]
 yc-bench = ["yc-bench @ git+https://github.com/collinear-ai/yc-bench.git@bfb0c88062450f46341bd9a5298903fc2e952a5c ; python_version >= '3.12'"]
+real-tests = [
+  # See tests/integration/README.md for setup.
+  "telethon>=1.36,<2",
+]
 all = [
   "hermes-agent[modal]",
   "hermes-agent[daytona]",
@@ -132,5 +136,6 @@ include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "t
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
+    "real_telegram: real-network Telegram integration tests (require TELEGRAM_TEST_* env vars and telethon)",
 ]
-addopts = "-m 'not integration' -n auto"
+addopts = "-m 'not integration and not real_telegram' -n auto"
