@@ -10,9 +10,9 @@
 # so the suite must run on a single worker (overrides pyproject's `-n auto`).
 #
 # Usage:
-#   ./scripts/test-telegram-real.sh                    # all real_telegram tests
-#   ./scripts/test-telegram-real.sh ::test_smoke_help  # one test
-#   ./scripts/test-telegram-real.sh -k yolo            # filter by name
+#   ./scripts/test-telegram-integration.sh                    # full suite
+#   ./scripts/test-telegram-integration.sh ::test_smoke_help  # one test
+#   ./scripts/test-telegram-integration.sh -k yolo            # filter by name
 #
 # Any extra args are forwarded to pytest.
 
@@ -21,6 +21,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 exec uv run pytest \
-    tests/integration/test_telegram_real.py \
-    -v -m real_telegram -n 0 -rs \
+    tests/integration/telegram/ \
+    -v -m telegram_integration -n 0 -rs \
     "$@"

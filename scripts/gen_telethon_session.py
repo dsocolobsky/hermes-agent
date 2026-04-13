@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate a Telethon StringSession for the real-Telegram integration tests.
+"""Generate a Telethon StringSession for the Telegram integration tests.
 
 Usage:
-    uv pip install -e '.[real-tests]'
+    uv pip install -e '.[telegram-integration]'
     python scripts/gen_telethon_session.py
 
 You'll be prompted for:
@@ -30,7 +30,7 @@ def main() -> int:
     except ImportError:
         print(
             "telethon is not installed. Install with:\n"
-            "    uv pip install -e '.[real-tests]'",
+            "    uv pip install -e '.[telegram-integration]'",
             file=sys.stderr,
         )
         return 1
@@ -44,6 +44,8 @@ def main() -> int:
         print(f"API_ID must be an integer, got: {api_id!r}", file=sys.stderr)
         return 1
 
+    # Will ask interactively for phone number, 2fa, etc.
+    # https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.auth.AuthMethods.start
     with TelegramClient(StringSession(), api_id_int, api_hash) as client:
         session_str = client.session.save()
         print()

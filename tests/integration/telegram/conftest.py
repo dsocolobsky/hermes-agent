@@ -1,19 +1,17 @@
-"""Shared fixtures for real-network integration tests.
+"""Fixtures for real-network Telegram integration tests.
 
 This conftest overrides two function-scoped autouse fixtures from the root
-`tests/conftest.py` so that session-scoped runner/client fixtures can live for
-the duration of the test run instead of being torn down between tests:
+``tests/conftest.py`` so that session-scoped runner/client fixtures can live
+for the duration of the test run instead of being torn down between tests:
 
-* `_isolate_hermes_home` is replaced by a session-scoped variant that picks a
-  single HERMES_HOME for the whole integration run.
-* `_enforce_test_timeout` is replaced by a no-op — real-network round-trips
+* ``_isolate_hermes_home`` is replaced by a session-scoped variant that picks
+  a single HERMES_HOME for the whole integration run.
+* ``_enforce_test_timeout`` is replaced by a no-op — real-network round-trips
   through Telegram can exceed 30s; individual tests set their own budgets with
-  `asyncio.wait_for`.
+  ``asyncio.wait_for``.
 
-Other integration tests in this directory (modal, daytona, batch_runner …)
-previously ran under those function-scoped parents; the overrides here still
-give them a working HERMES_HOME and just lift the per-test alarm, which they
-don't rely on.
+These overrides are scoped to ``tests/integration/telegram/`` only and do not
+affect other integration tests in the parent directory.
 """
 from __future__ import annotations
 
@@ -83,10 +81,10 @@ def _enforce_test_timeout():
 
 
 # ---------------------------------------------------------------------------
-# Real-Telegram configuration gating
+# Telegram integration test configuration gating
 # ---------------------------------------------------------------------------
 
-REAL_TELEGRAM_ENV_VARS = (
+TELEGRAM_INTEGRATION_ENV_VARS = (
     "TELEGRAM_TEST_BOT_TOKEN",
     "TELEGRAM_TEST_API_ID",
     "TELEGRAM_TEST_API_HASH",
@@ -97,10 +95,10 @@ REAL_TELEGRAM_ENV_VARS = (
 
 def _skip_if_not_configured() -> None:
     """Call from a fixture body to skip the dependent test cleanly."""
-    missing = [k for k in REAL_TELEGRAM_ENV_VARS if not os.getenv(k)]
+    missing = [k for k in TELEGRAM_INTEGRATION_ENV_VARS if not os.getenv(k)]
     if missing:
         pytest.skip(
-            "Real Telegram integration requires env vars: "
+            "Telegram integration tests require env vars: "
             + ", ".join(missing)
             + ". See tests/integration/README.md."
         )
@@ -109,7 +107,7 @@ def _skip_if_not_configured() -> None:
     except ImportError:
         pytest.skip(
             "telethon not installed; install with: "
-            "uv pip install -e '.[real-tests]'"
+            "uv pip install -e '.[telegram-integration]'"
         )
     # pytest-xdist parallelism would have multiple workers spin up their own
     # GatewayRunner against the same bot token — Telegram only allows one
@@ -118,9 +116,9 @@ def _skip_if_not_configured() -> None:
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id is not None and worker_id not in ("master", "gw0"):
         pytest.skip(
-            "Real Telegram tests must run on a single worker. "
-            "Re-run with: pytest tests/integration/test_telegram_real.py "
-            "-v -m real_telegram -n 0"
+            "Telegram integration tests must run on a single worker. "
+            "Re-run with: pytest tests/integration/telegram/ "
+            "-v -m telegram_integration -n 0 -rs"
         )
 
 
@@ -291,7 +289,7 @@ telethon_client = _telethon_fixture()
 # ---------------------------------------------------------------------------
 
 class BotChat:
-    """Per-test convenience wrapper around a Telethon ↔ bot conversation.
+    """Per-test convenience wrapper around a Telethon <-> bot conversation.
 
     Registers a one-shot event handler on the Telethon client that queues every
     inbound message from the test bot, then exposes ``send`` / ``expect_reply``

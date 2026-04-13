@@ -1,17 +1,17 @@
 # Integration tests
 
-This directory holds tests that talk to **real external services**. They are excluded from the default `pytest` run via `addopts = "-m 'not integration and not real_telegram'"` in `pyproject.toml`, so they never execute unless you opt in with a marker.
+This directory holds tests that talk to **real external services**. They are excluded from the default `pytest` run via `addopts = "-m 'not integration and not telegram_integration'"` in `pyproject.toml`, so they never execute unless you opt in with a marker.
 
 | File | Marker | Requires |
 |------|--------|----------|
-| `test_telegram_real.py` | `real_telegram` | A real Telegram bot + a Telethon user session (see below) |
+| `telegram/test_telegram_integration.py` | `telegram_integration` | A real Telegram bot + a Telethon user session (see below) |
 | `test_batch_runner.py`, `test_modal_terminal.py`, … | `integration` | Various API keys |
 
-## Real-Telegram setup (one-time)
+## Telegram integration setup (one-time)
 
-The real-Telegram suite boots a real `GatewayRunner` with a dedicated bot token, then drives it from a Telethon user account over the live Telegram network. The round-trip exercises the full stack: `python-telegram-bot`, polling, MarkdownV2 escaping, batching, and the base-adapter pipeline.
+The Telegram integration suite boots a real `GatewayRunner` with a dedicated bot token, then drives it from a Telethon user account over the live Telegram network. The round-trip exercises the full stack: `python-telegram-bot`, polling, MarkdownV2 escaping, batching, and the base-adapter pipeline.
 
-### 1. Create a throwaway bot
+### 1. Create a new Telegram bot
 
 Talk to [@BotFather](https://t.me/BotFather) on Telegram:
 
@@ -19,7 +19,7 @@ Talk to [@BotFather](https://t.me/BotFather) on Telegram:
 2. Copy the token it gives you → this is `TELEGRAM_TEST_BOT_TOKEN`
 3. `/setprivacy` → **Disable** (so the bot sees all group messages; required for later stages that test group behavior)
 
-**Never reuse a production bot token** — the tests will call `/new`, `/yolo`, etc. and can disturb live sessions.
+Don't reuse bot tokens since the tests will call `/new`, `/yolo`, etc. and can disturb live sessions.
 
 ### 2. Obtain Telegram API credentials
 
@@ -33,11 +33,13 @@ Telethon needs user-level MTProto credentials separate from the bot token. Log i
 Use a dedicated "test user" Telegram account (a second phone number, ideally). Running the helper will prompt for the API creds and a login code sent to that account:
 
 ```bash
-uv pip install -e '.[real-tests]'
+uv pip install -e '.[telegram-integration]'
 python scripts/gen_telethon_session.py
 ```
 
-It prints a `TELEGRAM_TEST_SESSION_STRING=…` line. Copy the value into your env / CI secret. **Treat it like a password** — it grants full access to that account.
+This will prompt you for phone number, password, 2FA, etc. so it's recommended to use a new account.
+
+It prints a `TELEGRAM_TEST_SESSION_STRING=…` line. Copy the value into your env / CI secret. **Treat it like a password** as it grants full access to that account.
 
 ### 4. Configure env vars
 
@@ -57,27 +59,25 @@ Open Telegram on the test-user account and send any message to `@my_hermes_test_
 
 ### 6. Authorization
 
-The `gateway_runner` fixture sets `GATEWAY_ALLOW_ALL_USERS=true` for the duration of the suite, so the test user is recognized without a pairing dance. This is safe because the test bot is throwaway — don't use this flag on a real bot.
-
-If you see a `Hi~ I don't recognize you yet! Here's your pairing code: …` reply, it means the runner was started without that env override (e.g. you spun up `hermes gateway run` manually against the test token instead of using the fixture). Kill that and re-run the suite.
+The `gateway_runner` fixture sets `GATEWAY_ALLOW_ALL_USERS=true` for the duration of the suite, so the test user is recognized without asking for pairing code etc.. This is safe because the test bot is throwaway, don't use this flag on a real bot.
 
 ### 7. Make sure no other process is polling the same bot
 
-Telegram allows only one polling consumer per bot token. If your dev gateway is running with the test token, stop it before the suite runs — otherwise you'll see `Conflict: terminated by other getUpdates` errors.
+Telegram allows only one polling consumer per bot token. If your dev gateway is running with the test token, stop it before the suite runs otherwise you'll see `Conflict: terminated by other getUpdates` errors.
 
 ### 8. Run the suite
 
 ```bash
-./scripts/test-telegram-real.sh
+./scripts/test-telegram-integration.sh
 ```
 
 That's a thin wrapper around:
 
 ```bash
-uv run pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0 -rs
+uv run pytest tests/integration/telegram/ -v -m telegram_integration -n 0 -rs
 ```
 
-Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-telegram-real.sh -k yolo` or `./scripts/test-telegram-real.sh ::test_smoke_help`).
+Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-telegram-integration.sh -k yolo` or `./scripts/test-telegram-integration.sh ::test_smoke_help`).
 
 **`-n 0` is required.** The default `addopts` in `pyproject.toml` runs pytest under xdist with multiple workers, but Telegram only allows one polling consumer per bot token — running multiple workers would fight over `getUpdates` and crash. `-n 0` disables xdist for this invocation. Tests within the suite are also intentionally sequential (they share session state for `/yolo`, `/new`, etc.).
 
@@ -85,26 +85,20 @@ Without the env vars set, the tests **skip cleanly** — this is the expected lo
 
 ## Running in CI
 
-Triggered manually only — never on push or PR. The `real-telegram` job in `.github/workflows/tests.yml` is gated `if: github.event_name == 'workflow_dispatch'` because the secrets it uses include a Telethon user-account session string with full access to that account; running it on every PR would let any contributor (or a compromised maintainer) exfiltrate the secret with a one-line code change.
-
 ### One-time CI setup (maintainer)
 
-1. Create a GitHub Environment named **`real-telegram`** under *Settings → Environments → New environment*.
+1. Create a GitHub Environment named **`telegram-integration`** under *Settings → Environments → New environment*.
 2. In that environment, add the five secrets from step 4 above (`TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_API_ID`, `TELEGRAM_TEST_API_HASH`, `TELEGRAM_TEST_SESSION_STRING`, `TELEGRAM_TEST_BOT_USERNAME`).
-3. *Strongly recommended:* enable **Required reviewers** on the environment and add at least one maintainer other than yourself. Each `workflow_dispatch` run will then pause until a different maintainer clicks *Approve and run* before the secrets unlock — two-eyes principle, defense against a single compromised account.
+3. *Strongly recommended:* enable **Required reviewers** on the environment and add at least one maintainer other than yourself. Each `workflow_dispatch` run will then pause until a different maintainer clicks *Approve and run* before the secrets unlock.
 4. *Strongly recommended:* use a dedicated throwaway Telegram account for the Telethon session, not your personal account. If the session string ever leaks, an attacker gets full access to that account.
 
 ### Triggering a run
 
 *Actions tab → Tests workflow → Run workflow → choose branch → Run workflow.* The job will:
-- Skip the `test` and `e2e` jobs (those still run automatically on push/PR; `workflow_dispatch` is reserved for `real-telegram`).
+- Skip the `test` and `e2e` jobs (those still run automatically on push/PR; `workflow_dispatch` is reserved for `telegram-integration`).
 - Pause for environment approval if you configured required reviewers.
-- Run `pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0 -rs` against the chosen ref.
-
-### Why fork PRs can't trigger this
-
-GitHub deliberately blocks fork PRs from accessing secrets — there's no way around it, and that's the desired behavior. Maintainers reviewing a fork PR can manually trigger `workflow_dispatch` against the PR's ref after reviewing the diff (Actions tab → Tests → Run workflow → branch dropdown shows PR refs as `refs/pull/N/merge` if you have the right permissions, or push the PR branch into the upstream repo first).
-
+- Run `pytest tests/integration/telegram/ -v -m telegram_integration -n 0 -rs` against the chosen ref.
+- 
 ## Troubleshooting
 
 - **`AuthKeyUnregisteredError` / session not authorized** — regenerate the session with `scripts/gen_telethon_session.py`; sessions expire after long inactivity.
