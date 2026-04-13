@@ -68,12 +68,42 @@ Telegram allows only one polling consumer per bot token. If your dev gateway is 
 ### 8. Run the suite
 
 ```bash
-pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0
+./scripts/test-telegram-real.sh
 ```
+
+That's a thin wrapper around:
+
+```bash
+uv run pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0 -rs
+```
+
+Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-telegram-real.sh -k yolo` or `./scripts/test-telegram-real.sh ::test_smoke_help`).
 
 **`-n 0` is required.** The default `addopts` in `pyproject.toml` runs pytest under xdist with multiple workers, but Telegram only allows one polling consumer per bot token — running multiple workers would fight over `getUpdates` and crash. `-n 0` disables xdist for this invocation. Tests within the suite are also intentionally sequential (they share session state for `/yolo`, `/new`, etc.).
 
-Without the env vars set, the tests **skip cleanly** — this is expected and is how CI runs for fork PRs without access to secrets.
+Without the env vars set, the tests **skip cleanly** — this is the expected local behavior when you haven't set up a test bot yet.
+
+## Running in CI
+
+Triggered manually only — never on push or PR. The `real-telegram` job in `.github/workflows/tests.yml` is gated `if: github.event_name == 'workflow_dispatch'` because the secrets it uses include a Telethon user-account session string with full access to that account; running it on every PR would let any contributor (or a compromised maintainer) exfiltrate the secret with a one-line code change.
+
+### One-time CI setup (maintainer)
+
+1. Create a GitHub Environment named **`real-telegram`** under *Settings → Environments → New environment*.
+2. In that environment, add the five secrets from step 4 above (`TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_API_ID`, `TELEGRAM_TEST_API_HASH`, `TELEGRAM_TEST_SESSION_STRING`, `TELEGRAM_TEST_BOT_USERNAME`).
+3. *Strongly recommended:* enable **Required reviewers** on the environment and add at least one maintainer other than yourself. Each `workflow_dispatch` run will then pause until a different maintainer clicks *Approve and run* before the secrets unlock — two-eyes principle, defense against a single compromised account.
+4. *Strongly recommended:* use a dedicated throwaway Telegram account for the Telethon session, not your personal account. If the session string ever leaks, an attacker gets full access to that account.
+
+### Triggering a run
+
+*Actions tab → Tests workflow → Run workflow → choose branch → Run workflow.* The job will:
+- Skip the `test` and `e2e` jobs (those still run automatically on push/PR; `workflow_dispatch` is reserved for `real-telegram`).
+- Pause for environment approval if you configured required reviewers.
+- Run `pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0 -rs` against the chosen ref.
+
+### Why fork PRs can't trigger this
+
+GitHub deliberately blocks fork PRs from accessing secrets — there's no way around it, and that's the desired behavior. Maintainers reviewing a fork PR can manually trigger `workflow_dispatch` against the PR's ref after reviewing the diff (Actions tab → Tests → Run workflow → branch dropdown shows PR refs as `refs/pull/N/merge` if you have the right permissions, or push the PR branch into the upstream repo first).
 
 ## Troubleshooting
 
