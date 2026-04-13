@@ -11,9 +11,6 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-  # Manual-only trigger for the real-Telegram job below.  Maintainers run it
-  # from the Actions tab against a chosen ref; secrets are gated by the
-  # `real-telegram` GitHub Environment (configure required reviewers there).
   workflow_dispatch:
 
 permissions:
@@ -26,8 +23,8 @@ concurrency:
 
 jobs:
   test:
-    # Skip on workflow_dispatch — that trigger is reserved for the real-telegram
-    # job below and would otherwise re-run the full unit suite for no reason.
+    # Skip on workflow_dispatch since that trigger is used by telegram-integration job
+    # and would otherwise re-run the full unit test suite
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -89,26 +86,15 @@ jobs:
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
-  real-telegram:
+  telegram-integration:
     # Drives a real Hermes gateway (with a throwaway test bot token) over the
     # live Telegram network, using a Telethon user account as the test client.
-    #
-    # Trigger model: manual only (workflow_dispatch from the Actions tab).
-    # We deliberately do NOT run on push or pull_request — the secrets used
-    # here include a Telethon user-account session string with full access
-    # to that account, so untrusted code (including collaborator PRs) must
-    # never see them automatically.  A maintainer with repo write access runs
-    # the job on demand against the chosen ref.
-    #
-    # The `environment: real-telegram` line gates the secrets behind a GitHub
-    # Environment.  Configure required reviewers on that environment in the
-    # repo settings (Settings → Environments → real-telegram → "Required
-    # reviewers") to require a second maintainer's approval before each run
-    # unlocks the secrets.  See tests/integration/README.md for setup notes.
+    # For now trigger mode is manual, to be decided when to run.
+    # See tests/integration/README.md for setup
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: real-telegram
+    environment: telegram-integration
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -123,21 +109,20 @@ jobs:
         run: |
           uv venv .venv --python 3.11
           source .venv/bin/activate
-          uv pip install -e ".[all,dev,real-tests]"
+          uv pip install -e ".[all,dev,telegram-integration]"
 
-      - name: Run real-Telegram integration tests
-        # -n 0 forces a single worker; only one process can poll a bot token at
-        # a time.  See tests/integration/README.md for the full setup notes.
+      - name: Run Telegram integration tests
+        # -n 0 forces a single worker; only one process can poll a bot token at a time
         run: |
           source .venv/bin/activate
-          python -m pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0 -rs
+          python -m pytest tests/integration/telegram/ -v -m telegram_integration -n 0 -rs
         env:
           TELEGRAM_TEST_BOT_TOKEN: ${{ secrets.TELEGRAM_TEST_BOT_TOKEN }}
           TELEGRAM_TEST_API_ID: ${{ secrets.TELEGRAM_TEST_API_ID }}
           TELEGRAM_TEST_API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
           TELEGRAM_TEST_SESSION_STRING: ${{ secrets.TELEGRAM_TEST_SESSION_STRING }}
           TELEGRAM_TEST_BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
-          # Don't accidentally hit a real LLM — Stage 1 is command-only.
+          # For now tests should not call LLMs, so clear these just in case.
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
