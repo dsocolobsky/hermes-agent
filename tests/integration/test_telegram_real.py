@@ -236,3 +236,91 @@ def _group_into_bursts(messages: list, gap: float) -> list:
         else:
             bursts.append([curr])
     return bursts
+
+
+# ---------------------------------------------------------------------------
+# More deterministic command coverage (no LLM, gateway-available commands)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_profile_command(bot_chat):
+    """/profile shows the active profile name and HERMES_HOME path."""
+    reply = await bot_chat.send_and_expect("/profile", timeout=30.0)
+    assert "Profile" in reply, f"missing 'Profile' label. Got: {reply!r}"
+    assert "Home" in reply, f"missing 'Home' label. Got: {reply!r}"
+    # The integration HERMES_HOME is a tmp dir created by _integration_hermes_home;
+    # its name starts with "hermes_integration_home".
+    assert "hermes_integration_home" in reply, (
+        f"/profile should report the integration tmp HERMES_HOME, got: {reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_title_round_trips_through_status(bot_chat):
+    """Setting a session title via /title surfaces in the next /status."""
+    title = f"integration-test-{__import__('uuid').uuid4().hex[:8]}"
+    set_reply = await bot_chat.send_and_expect(f"/title {title}", timeout=30.0)
+    assert "Session title set" in set_reply or title in set_reply, (
+        f"/title did not confirm. Got: {set_reply!r}"
+    )
+
+    status_reply = await bot_chat.send_and_expect("/status", timeout=30.0)
+    assert title in status_reply, (
+        f"/status did not surface the title we just set. "
+        f"title={title!r}, /status={status_reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_usage_with_no_agent_history(bot_chat):
+    """/usage with no agent calls reports the deterministic 'no data' fallback.
+
+    The bot_chat fixture runs /new before each test, so any cached agent gets
+    evicted and the running-agent map is empty -> /usage hits its fallback
+    branch which reports either 'No usage data available' or the
+    messages-count summary.
+    """
+    reply = await bot_chat.send_and_expect("/usage", timeout=30.0)
+    assert (
+        "No usage data available" in reply
+        or "Detailed usage available after the first agent response" in reply
+    ), f"/usage fallback message not found. Got: {reply!r}"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_provider_lists_options(bot_chat):
+    """/provider lists at least one provider and identifies the current one."""
+    reply = await bot_chat.send_and_expect("/provider", timeout=30.0)
+    # At least one of the well-known provider identifiers should appear.
+    known_providers = ("openrouter", "openai", "anthropic", "nous")
+    assert any(p in reply.lower() for p in known_providers), (
+        f"/provider reply did not mention any known provider {known_providers!r}. "
+        f"Got: {reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_personality_lists_or_reports_none(bot_chat):
+    """/personality (no args) either lists personalities or reports none configured."""
+    reply = await bot_chat.send_and_expect("/personality", timeout=30.0)
+    assert (
+        "Available Personalities" in reply
+        or "No personalities configured" in reply
+    ), f"/personality fell into neither expected branch. Got: {reply!r}"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_verbose_command_gated_off_by_default(bot_chat):
+    """/verbose is config-gated; without the gate it returns the helpful notice.
+
+    The test environment doesn't set ``display.tool_progress_command: true``
+    in any config.yaml, so the handler at gateway/run.py:5800 hits its
+    not-enabled branch and explains how to turn it on.
+    """
+    reply = await bot_chat.send_and_expect("/verbose", timeout=30.0)
+    assert "not enabled" in reply.lower(), (
+        f"/verbose should return the gate-disabled notice. Got: {reply!r}"
+    )
+    assert "tool_progress_command" in reply, (
+        f"/verbose notice should mention the config key. Got: {reply!r}"
+    )
