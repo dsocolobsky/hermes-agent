@@ -220,18 +220,29 @@ def gateway_runner(_integration_hermes_home):
     # a known test user; there's no user base to protect, so open access is
     # the right default.  Without this the gateway's pairing flow kicks in and
     # replies with a pairing code instead of the expected command output.
-    prev_allow_all = os.environ.get("GATEWAY_ALLOW_ALL_USERS")
-    os.environ["GATEWAY_ALLOW_ALL_USERS"] = "true"
+    overrides = {
+        "GATEWAY_ALLOW_ALL_USERS": "true",
+        # Bump the text-batching window so the batching test has comfortable
+        # timing (default 0.6s is tight when sends round-trip through Telegram).
+        # Tests that don't care about batching just see slightly delayed
+        # dispatch, which doesn't affect their assertions.
+        "HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS": "3.0",
+    }
+    saved = {k: os.environ.get(k) for k in overrides}
+    os.environ.update(overrides)
     harness = _RunnerHarness()
     try:
         harness.start(os.environ["TELEGRAM_TEST_BOT_TOKEN"])
         yield harness.runner
     finally:
         harness.stop()
-        if prev_allow_all is None:
-            os.environ.pop("GATEWAY_ALLOW_ALL_USERS", None)
-        else:
-            os.environ["GATEWAY_ALLOW_ALL_USERS"] = prev_allow_all
+        # Restore the pre-test env: delete keys that weren't set before
+        # (saved value is None), put back the original value otherwise.
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 # ---------------------------------------------------------------------------
@@ -326,26 +337,57 @@ class BotChat:
         await self.drain()
         return await self.client.send_message(self.bot_entity, text)
 
-    async def expect_reply(self, timeout: float = 20.0, settle: float = 1.5) -> str:
+    async def expect_reply_messages(self, timeout: float = 20.0, settle: float = 1.5) -> list:
         """Wait for the next reply, then collect any follow-up chunks that
-        arrive within *settle* seconds and return the concatenated text.
-
-        The Telegram adapter may chunk long replies over MAX_MESSAGE_LENGTH, so
-        assertions want the full text.
+        arrive within *settle* seconds.  Returns the raw Telethon Message
+        objects so tests can inspect entities, attachments, etc.
         """
         first = await asyncio.wait_for(self._queue.get(), timeout)
-        chunks = [first.message or ""]
+        messages = [first]
         while True:
             try:
                 extra = await asyncio.wait_for(self._queue.get(), settle)
-                chunks.append(extra.message or "")
+                messages.append(extra)
             except asyncio.TimeoutError:
                 break
-        return "\n".join(chunks)
+        return messages
+
+    async def expect_reply(self, timeout: float = 20.0, settle: float = 1.5) -> str:
+        """Text-only convenience wrapper around expect_reply_messages."""
+        messages = await self.expect_reply_messages(timeout=timeout, settle=settle)
+        return "\n".join((m.message or "") for m in messages)
 
     async def send_and_expect(self, text: str, timeout: float = 20.0) -> str:
         await self.send(text)
         return await self.expect_reply(timeout=timeout)
+
+    async def collect_replies(self, window: float = 5.0, settle: float = 1.5) -> list:
+        """Collect every reply that arrives within ``window`` seconds total,
+        with a quiet-period of ``settle`` seconds determining "done".
+
+        Unlike ``expect_reply_messages`` this does NOT require at least one
+        reply. Returns ``[]`` if nothing arrives within the window.  Useful
+        for assertions like "exactly N replies" or "no reply at all".
+        """
+        import time
+
+        deadline = time.monotonic() + window
+        messages: list = []
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                wait = settle if messages else remaining
+                msg = await asyncio.wait_for(self._queue.get(), min(wait, remaining))
+                messages.append(msg)
+            except asyncio.TimeoutError:
+                if messages:
+                    # We got at least one and then quiet for `settle` -> done.
+                    break
+                # Otherwise the full window expired with nothing.
+                break
+        return messages
 
 
 def _bot_chat_fixture():
