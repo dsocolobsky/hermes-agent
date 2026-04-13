@@ -111,6 +111,17 @@ def _skip_if_not_configured() -> None:
             "telethon not installed; install with: "
             "uv pip install -e '.[real-tests]'"
         )
+    # pytest-xdist parallelism would have multiple workers spin up their own
+    # GatewayRunner against the same bot token — Telegram only allows one
+    # polling consumer per token, so the rest would crash with `Conflict:
+    # terminated by other getUpdates`.  Fail fast with a clear message.
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker_id is not None and worker_id not in ("master", "gw0"):
+        pytest.skip(
+            "Real Telegram tests must run on a single worker. "
+            "Re-run with: pytest tests/integration/test_telegram_real.py "
+            "-v -m real_telegram -n 0"
+        )
 
 
 # ---------------------------------------------------------------------------

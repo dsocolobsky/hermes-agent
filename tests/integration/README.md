@@ -55,15 +55,23 @@ export TELEGRAM_TEST_BOT_USERNAME=my_hermes_test_bot   # without the leading @
 
 Open Telegram on the test-user account and send any message to `@my_hermes_test_bot` (e.g. "hi"). This creates the chat entity so Telethon can resolve it.
 
-### 6. Make sure no other process is polling the same bot
+### 6. Authorization
+
+The `gateway_runner` fixture sets `GATEWAY_ALLOW_ALL_USERS=true` for the duration of the suite, so the test user is recognized without a pairing dance. This is safe because the test bot is throwaway — don't use this flag on a real bot.
+
+If you see a `Hi~ I don't recognize you yet! Here's your pairing code: …` reply, it means the runner was started without that env override (e.g. you spun up `hermes gateway run` manually against the test token instead of using the fixture). Kill that and re-run the suite.
+
+### 7. Make sure no other process is polling the same bot
 
 Telegram allows only one polling consumer per bot token. If your dev gateway is running with the test token, stop it before the suite runs — otherwise you'll see `Conflict: terminated by other getUpdates` errors.
 
-### 7. Run the suite
+### 8. Run the suite
 
 ```bash
-pytest tests/integration/test_telegram_real.py -v -m real_telegram
+pytest tests/integration/test_telegram_real.py -v -m real_telegram -n 0
 ```
+
+**`-n 0` is required.** The default `addopts` in `pyproject.toml` runs pytest under xdist with multiple workers, but Telegram only allows one polling consumer per bot token — running multiple workers would fight over `getUpdates` and crash. `-n 0` disables xdist for this invocation. Tests within the suite are also intentionally sequential (they share session state for `/yolo`, `/new`, etc.).
 
 Without the env vars set, the tests **skip cleanly** — this is expected and is how CI runs for fork PRs without access to secrets.
 
