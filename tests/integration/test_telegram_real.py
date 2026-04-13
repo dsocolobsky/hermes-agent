@@ -143,3 +143,96 @@ async def test_unknown_command_replies_helpfully(bot_chat):
     assert "/commands" in reply, (
         f"unknown command notice should point at /commands. Got: {reply!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: adapter behaviors (things mocked tests structurally can't verify)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_markdown_v2_formatting_arrives_intact(bot_chat):
+    """The /status reply must arrive as MarkdownV2-formatted text.
+
+    /status emits ``**Hermes Gateway Status**``, ``**Session ID:** \\`<id>\\```,
+    and dates with MarkdownV2-special ``-`` and ``:`` chars.  If the adapter's
+    MarkdownV2 escaping were broken, Telegram would reject the message and the
+    adapter would either drop the reply or fall back to plaintext (no
+    formatting entities) — both observable here.
+    """
+    from telethon.tl.types import (
+        MessageEntityBold,
+        MessageEntityCode,
+    )
+
+    await bot_chat.send("/status")
+    messages = await bot_chat.expect_reply_messages(timeout=30.0)
+    assert len(messages) >= 1
+
+    # Sanity: text content arrived.
+    full_text = "\n".join((m.message or "") for m in messages)
+    assert "Hermes Gateway Status" in full_text
+
+    # Crucial: formatting entities arrived too — proves the MarkdownV2 path
+    # was accepted by Telegram, not the silent fallback to plain text.
+    all_entities = []
+    for m in messages:
+        all_entities.extend(m.entities or [])
+    has_bold = any(isinstance(e, MessageEntityBold) for e in all_entities)
+    has_code = any(isinstance(e, MessageEntityCode) for e in all_entities)
+    assert has_bold or has_code, (
+        f"/status reply has no Bold/Code formatting entities — the adapter "
+        f"likely fell back to plaintext after a MarkdownV2 parse rejection. "
+        f"entities={all_entities!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_rapid_messages_are_batched(bot_chat):
+    """Three rapid messages within the batch window should produce ONE reply.
+
+    The Telegram adapter coalesces client-side message splits (rapid
+    sequential text from the same chat) into a single MessageEvent inside
+    ``_pending_text_batches``, flushed after
+    ``HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS`` of quiet.  This tier is the
+    only one that can observe that behavior — mocks can fake the timer but
+    can't verify the real adapter actually waits + dispatches once.
+
+    The conftest bumps the batch delay to 3.0s so three sequential
+    Telethon ``send_message`` round-trips comfortably fit inside the window.
+    """
+    await bot_chat.drain()
+
+    # Bypass bot_chat.send (which drains before each call) so the queue keeps
+    # everything that arrives during and after the burst.
+    for _ in range(3):
+        await bot_chat.client.send_message(bot_chat.bot_entity, "/help")
+
+    # Generous collection window: 3s batch wait + adapter dispatch + bot reply
+    # round-trip + safety margin.  Settle of 2.5s ensures we don't return early
+    # if the adapter sends two quick chunks for a long /help reply.
+    replies = await bot_chat.collect_replies(window=15.0, settle=2.5)
+
+    # Group replies into "logical" responses by reply window: chunks of the same
+    # /help response arrive close together, so we count *bursts* not raw messages.
+    # If batching coalesced our 3 sends into 1 dispatch, we expect 1 burst (which
+    # may itself be 1+ chunks if /help is long).
+    bursts = _group_into_bursts(replies, gap=2.0)
+    assert len(bursts) == 1, (
+        f"expected text batching to coalesce 3 rapid /help into 1 reply burst, "
+        f"got {len(bursts)} bursts ({len(replies)} total messages). "
+        f"first chars of each burst: {[(b[0].message or '')[:60] for b in bursts]!r}"
+    )
+
+
+def _group_into_bursts(messages: list, gap: float) -> list:
+    """Group consecutive messages into bursts where intra-burst gaps < ``gap`` seconds."""
+    if not messages:
+        return []
+    bursts = [[messages[0]]]
+    for prev, curr in zip(messages, messages[1:]):
+        delta = (curr.date - prev.date).total_seconds()
+        if delta <= gap:
+            bursts[-1].append(curr)
+        else:
+            bursts.append([curr])
+    return bursts
