@@ -5,6 +5,7 @@ This directory holds tests that talk to **real external services**. They are exc
 | File | Marker | Requires |
 |------|--------|----------|
 | `telegram/test_telegram_integration.py` | `telegram_integration` | A real Telegram bot + a Telethon user session (see below) |
+| `discord/test_discord_integration.py` | `discord_integration` | Two real Discord bots + a private test guild (see below) |
 | `test_batch_runner.py`, `test_modal_terminal.py`, … | `integration` | Various API keys |
 
 ## Telegram integration setup (one-time)
@@ -77,7 +78,7 @@ That's a thin wrapper around:
 uv run pytest tests/integration/telegram/ -v -m telegram_integration -n 0 -rs
 ```
 
-Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-telegram-integration.sh -k yolo` or `./scripts/test-telegram-integration.sh ::test_smoke_help`).
+Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-telegram-integration.sh -k yolo` or `./scripts/test-telegram-integration.sh -k test_smoke_help`). To select a single test by full nodeid, pass the file path explicitly: `./scripts/test-telegram-integration.sh tests/integration/telegram/test_telegram_integration.py::test_smoke_help`.
 
 **`-n 0` is required.** The default `addopts` in `pyproject.toml` runs pytest under xdist with multiple workers, but Telegram only allows one polling consumer per bot token — running multiple workers would fight over `getUpdates` and crash. `-n 0` disables xdist for this invocation. Tests within the suite are also intentionally sequential (they share session state for `/yolo`, `/new`, etc.).
 
@@ -99,9 +100,112 @@ Without the env vars set, the tests **skip cleanly** — this is the expected lo
 - Pause for environment approval if you configured required reviewers.
 - Run `pytest tests/integration/telegram/ -v -m telegram_integration -n 0 -rs` against the chosen ref.
 - 
+## Discord integration setup (one-time)
+
+The Discord integration suite uses **two real Discord bots** running in the same pytest process:
+
+* The *gateway-under-test* — a normal Hermes Discord adapter, booted by the test harness with one of the throwaway tokens.
+* The *driver* — a second discord.py bot that posts test messages into a dedicated channel and captures the gateway bot's replies via an `on_message` listener.
+
+We use two bots because Discord prohibits selfbots (and has actively blocked them since 2021), so the Telegram approach of driving the bot from a user account does not translate.
+
+### 1. Create both bots in the Discord Developer Portal
+
+For each of `gateway-bot` and `driver-bot`:
+
+1. Go to <https://discord.com/developers/applications> → **New Application** → name it (e.g. `hermes-test-gateway`, `hermes-test-driver`).
+2. **Bot** tab → **Reset Token** → copy. These become `DISCORD_TEST_GATEWAY_BOT_TOKEN` and `DISCORD_TEST_DRIVER_BOT_TOKEN`.
+3. **Bot** tab → **Privileged Gateway Intents** → enable **Message Content Intent** (required for both bots — without it the driver's `on_message` will fire with empty content and every assertion will fail).
+4. **OAuth2 → URL Generator** → scopes: `bot`. Permissions: `Send Messages`, `Read Message History`, `View Channels`. Copy the generated URL and visit it to invite the bot to your test guild (see step 2).
+
+Don't reuse production bot tokens — the suite calls `/new`, `/yolo`, etc. and will disturb live sessions.
+
+### 2. Create a dedicated test guild
+
+In the Discord client (your normal user account):
+
+1. Server picker → **Add a Server → Create My Own → For me and my friends**. Name it something like `hermes-integration-tests`.
+2. Invite both bots to it via the OAuth2 URLs from step 1.4.
+3. Create a text channel (e.g. `#bot-tests`) — both bots will need View + Send permissions in it (the default permissions cover this).
+
+### 3. Grab the IDs
+
+Enable Discord developer mode: **User Settings → Advanced → Developer Mode** (toggle on). Now right-click any guild/channel/user and **Copy ID**.
+
+* Right-click the test guild in the server picker → Copy Server ID → `DISCORD_TEST_GUILD_ID`
+* Right-click `#bot-tests` → Copy Channel ID → `DISCORD_TEST_CHANNEL_ID`
+* Right-click the gateway-under-test bot in the member list → Copy User ID → `DISCORD_TEST_GATEWAY_BOT_USER_ID` (the driver's `on_message` listener filters on this so it only queues the gateway bot's replies)
+
+### 4. Configure env vars
+
+Locally, add to `~/.hermes/.env` (or your shell profile):
+
+```bash
+export DISCORD_TEST_GATEWAY_BOT_TOKEN=MTIzNDU2...
+export DISCORD_TEST_DRIVER_BOT_TOKEN=Nzg5MDEy...
+export DISCORD_TEST_GUILD_ID=123456789012345678
+export DISCORD_TEST_CHANNEL_ID=234567890123456789
+export DISCORD_TEST_GATEWAY_BOT_USER_ID=345678901234567890
+```
+
+### 5. Authorization & gating
+
+The `gateway_runner` fixture sets these env overrides for the suite:
+
+* `GATEWAY_ALLOW_ALL_USERS=true` — the driver bot bypasses the auth allowlist.
+* `DISCORD_ALLOW_BOTS=all` — the gateway accepts messages from another bot (default `none` would silently ignore the driver).
+* `DISCORD_IGNORE_NO_MENTION=false` — the gateway processes channel messages without requiring an `@mention` (default `true` would force `@gateway-bot /help` on every send).
+
+Don't set these flags on a production bot — they're only safe in the throwaway test guild.
+
+### 6. Make sure no other process is using the same tokens
+
+discord.py opens one gateway WebSocket per token. If a dev gateway is already connected with the test gateway-bot token, stop it before running the suite.
+
+### 7. Run the suite
+
+```bash
+./scripts/test-discord-integration.sh
+```
+
+That's a thin wrapper around:
+
+```bash
+uv run pytest tests/integration/discord/ -v -m discord_integration -n 0 -rs
+```
+
+Forward extra args to pytest by passing them to the script (e.g. `./scripts/test-discord-integration.sh -k yolo` or `./scripts/test-discord-integration.sh -k test_smoke_help`). To select a single test by full nodeid, pass the file path explicitly: `./scripts/test-discord-integration.sh tests/integration/discord/test_discord_integration.py::test_smoke_help`.
+
+`-n 0` is required for the same reasons as the Telegram suite — only one client per token, and tests share session state and run sequentially.
+
+Without the env vars set, the tests **skip cleanly** — this is the expected local behavior when you haven't set up the test bots yet.
+
+### CI setup
+
+Mirror the Telegram setup:
+
+1. Create a GitHub Environment named **`discord-integration`** under *Settings → Environments → New environment*.
+2. Add the five secrets from step 4 above.
+3. *Strongly recommended:* enable **Required reviewers** on the environment and add at least one maintainer other than yourself.
+4. *Strongly recommended:* the gateway-under-test bot's token is **suite-scoped** — keep it out of any production guilds.
+
+Trigger via *Actions tab → Tests workflow → Run workflow → choose branch*. The job will pause for environment approval (if configured) before the secrets unlock.
+
 ## Troubleshooting
+
+### Telegram
 
 - **`AuthKeyUnregisteredError` / session not authorized** — regenerate the session with `scripts/gen_telethon_session.py`; sessions expire after long inactivity.
 - **`GatewayRunner.start() returned False`** — bot token is invalid or another process is polling it.
 - **Test hangs for ~20s, then `TimeoutError` on `expect_reply`** — the bot is running but didn't reply. Check the gateway logs; most commonly a MarkdownV2 parse failure is dropping the reply on the floor.
 - **`FloodWaitError`** — you've hit a rate limit, usually from running the suite too often. Wait it out; Telegram returns the remaining seconds in the error.
+
+### Discord
+
+- **Every assertion fails with empty `content`** — Message Content Intent is not enabled on the driver bot in the Developer Portal. Toggle it on (no redeploy needed).
+- **`Driver bot did not become ready within 60s`** — `DISCORD_TEST_DRIVER_BOT_TOKEN` is wrong, or the driver bot hasn't been invited to the test guild.
+- **`Driver bot cannot see channel`** — check `DISCORD_TEST_CHANNEL_ID` and that the driver bot has View permissions in that channel.
+- **`/help` and friends never get a reply** — the gateway is silently dropping the driver's messages. The fixture sets five env overrides that together let a bot-authored message in a guild channel reach the command handler: `GATEWAY_ALLOW_ALL_USERS=true`, `DISCORD_ALLOW_BOTS=all`, `DISCORD_REQUIRE_MENTION=false`, `DISCORD_IGNORE_NO_MENTION=false`, `DISCORD_AUTO_THREAD=false`. If you've copied the conftest pattern elsewhere, make sure all five are in place — missing any of them will cause replies to vanish at a different gate.
+- **Test reply is just "⚡ Interrupting current task…"** — this is a gateway busy-session ack (gateway/run.py:1411) that fires when a new message arrives while the session still has a claim from a prior command. `BotChat.expect_reply_messages` already skips past these and waits for the real reply; if you're seeing this leak through a test assertion you're probably accessing the queue directly instead of going through `expect_reply` / `send_and_expect`.
+- **`GatewayRunner.start() returned False`** — `DISCORD_TEST_GATEWAY_BOT_TOKEN` is invalid, or another process (a dev gateway) is already connected with the same token.
+- **`LoginFailure: Improper token has been passed`** — the token string is malformed. Common causes: copied the Application ID (18-20 digits) or Public Key instead of the Bot Token, included a `Bot ` prefix, or copied with trailing whitespace. Verify shape with: `python -c 'import os; t=os.environ["DISCORD_TEST_GATEWAY_BOT_TOKEN"]; print("len:", len(t), "parts:", len(t.split(".")))'` — expect `len: ~70, parts: 3`. If wrong, Reset Token in the Developer Portal and re-export.
