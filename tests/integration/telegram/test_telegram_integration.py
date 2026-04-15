@@ -22,6 +22,8 @@ import re
 
 import pytest
 
+from tests.integration._shared import group_into_bursts
+
 pytestmark = [pytest.mark.telegram_integration]
 
 # ---------------------------------------------------------------------------
@@ -361,7 +363,7 @@ async def test_rapid_messages_are_batched(bot_chat):
     # Bypass bot_chat.send (which drains before each call) so the queue keeps
     # everything that arrives during and after the burst.
     for _ in range(3):
-        await bot_chat.client.send_message(bot_chat.bot_entity, "/help")
+        await bot_chat.send_raw("/help")
 
     # Generous collection window: 3s batch wait + adapter dispatch + bot reply
     # round-trip + safety margin.  Settle of 2.5s ensures we don't return early
@@ -372,23 +374,9 @@ async def test_rapid_messages_are_batched(bot_chat):
     # /help response arrive close together, so we count *bursts* not raw messages.
     # If batching coalesced our 3 sends into 1 dispatch, we expect 1 burst (which
     # may itself be 1+ chunks if /help is long).
-    bursts = _group_into_bursts(replies, gap=2.0)
+    bursts = group_into_bursts(replies, gap=2.0)
     assert len(bursts) == 1, (
         f"expected text batching to coalesce 3 rapid /help into 1 reply burst, "
         f"got {len(bursts)} bursts ({len(replies)} total messages). "
         f"first chars of each burst: {[(b[0].message or '')[:60] for b in bursts]!r}"
     )
-
-
-def _group_into_bursts(messages: list, gap: float) -> list:
-    """Group consecutive messages into bursts with gaps < ``gap`` seconds."""
-    if not messages:
-        return []
-    bursts = [[messages[0]]]
-    for prev, curr in zip(messages, messages[1:]):
-        delta = (curr.date - prev.date).total_seconds()
-        if delta <= gap:
-            bursts[-1].append(curr)
-        else:
-            bursts.append([curr])
-    return bursts
