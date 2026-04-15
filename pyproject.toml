@@ -92,6 +92,13 @@ telegram-integration = [
   # See tests/integration/README.md for setup.
   "telethon>=1.36,<2",
 ]
+discord-integration = [
+  # Real-network Discord integration tests (tests/integration/discord/).
+  # discord.py is already pulled in by the [messaging] / [all] extras;
+  # listed here for parity with telegram-integration so the install
+  # command in tests/integration/README.md is symmetrical.
+  "discord.py>=2.7.1,<3",
+]
 all = [
   "hermes-agent[modal]",
   "hermes-agent[daytona]",
@@ -138,5 +145,6 @@ testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
     "telegram_integration: real-network Telegram integration tests (require TELEGRAM_TEST_* env vars and telethon)",
+    "discord_integration: real-network Discord integration tests (require DISCORD_TEST_* env vars and discord.py)",
 ]
-addopts = "-m 'not integration and not telegram_integration' -n auto"
+addopts = "-m 'not integration and not telegram_integration and not discord_integration' -n auto"

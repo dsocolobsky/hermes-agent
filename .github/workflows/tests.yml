@@ -23,8 +23,9 @@ concurrency:
 
 jobs:
   test:
-    # Skip on workflow_dispatch since that trigger is used by telegram-integration job
-    # and would otherwise re-run the full unit test suite
+    # Skip on workflow_dispatch since that trigger is used by the
+    # telegram-integration / discord-integration jobs and would
+    # otherwise re-run the full unit test suite
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -122,6 +123,49 @@ jobs:
           TELEGRAM_TEST_API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
           TELEGRAM_TEST_SESSION_STRING: ${{ secrets.TELEGRAM_TEST_SESSION_STRING }}
           TELEGRAM_TEST_BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
+          # For now tests should not call LLMs, so clear these just in case.
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+  discord-integration:
+    # Drives a real Hermes gateway (with a throwaway test bot token) over the
+    # live Discord network, using a *second* Discord bot as the driver client
+    # (Discord prohibits selfbots, so the Telegram approach of using a user
+    # account doesn't translate). Manual trigger only.
+    # See tests/integration/README.md for setup.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: discord-integration
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.11
+          source .venv/bin/activate
+          uv pip install -e ".[all,dev,discord-integration]"
+
+      - name: Run Discord integration tests
+        # -n 0 forces a single worker; discord.py opens one gateway WebSocket
+        # per token, and tests share session state.
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/integration/discord/ -v -m discord_integration -n 0 -rs
+        env:
+          DISCORD_TEST_GATEWAY_BOT_TOKEN: ${{ secrets.DISCORD_TEST_GATEWAY_BOT_TOKEN }}
+          DISCORD_TEST_DRIVER_BOT_TOKEN: ${{ secrets.DISCORD_TEST_DRIVER_BOT_TOKEN }}
+          DISCORD_TEST_GUILD_ID: ${{ secrets.DISCORD_TEST_GUILD_ID }}
+          DISCORD_TEST_CHANNEL_ID: ${{ secrets.DISCORD_TEST_CHANNEL_ID }}
+          DISCORD_TEST_GATEWAY_BOT_USER_ID: ${{ secrets.DISCORD_TEST_GATEWAY_BOT_USER_ID }}
           # For now tests should not call LLMs, so clear these just in case.
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
