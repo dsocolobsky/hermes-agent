@@ -207,6 +207,46 @@ async def test_personality_lists_or_reports_none(bot_chat):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_retry_with_no_history(bot_chat):
+    """/retry on a fresh session (empty transcript) hits the "no previous" branch.
+
+    The bot_chat fixture runs /new before each test, so the session transcript
+    starts empty and _handle_retry_command at gateway/run.py:5040 returns the
+    deterministic fallback.
+    """
+    reply = await bot_chat.send_and_expect("/retry", timeout=30.0)
+    assert "No previous message to retry" in reply, (
+        f"/retry on empty history should return the no-previous-message "
+        f"notice. Got: {reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_undo_with_no_history(bot_chat):
+    """/undo on a fresh session reports the deterministic "nothing to undo"."""
+    reply = await bot_chat.send_and_expect("/undo", timeout=30.0)
+    assert "Nothing to undo" in reply, (
+        f"/undo on empty history should return 'Nothing to undo'. "
+        f"Got: {reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_compress_with_insufficient_history(bot_chat):
+    """/compress on a fresh session reports the deterministic floor.
+
+    _handle_compress_command at gateway/run.py:6166 requires >= 4 messages
+    before it'll try to summarise; an empty transcript hits the early return
+    without touching the provider.
+    """
+    reply = await bot_chat.send_and_expect("/compress", timeout=30.0)
+    assert "Not enough conversation to compress" in reply, (
+        f"/compress on empty history should report the insufficient-history "
+        f"notice. Got: {reply!r}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_verbose_command_gated_off_by_default(bot_chat):
     """/verbose is config-gated; without the gate it returns the helpful notice.
 
@@ -220,6 +260,49 @@ async def test_verbose_command_gated_off_by_default(bot_chat):
     )
     assert "tool_progress_command" in reply, (
         f"/verbose notice should mention the config key. Got: {reply!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Authorization flow
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_pairing_flow_for_unauthorized_user(bot_chat, monkeypatch):
+    """With allow-all disabled, an unrecognized DM triggers the pairing flow.
+
+    The harness normally sets ``GATEWAY_ALLOW_ALL_USERS=true`` so the test user
+    is auto-authorized.  Here we temporarily revoke that (and any allowlist
+    env vars that might be set in CI) so ``_is_user_authorized`` returns
+    False and the DM pairing branch at gateway/run.py:2684 fires.
+
+    The bot should reply with a pairing code and the ``hermes pairing approve``
+    hint instead of processing the command.  Auth is rechecked per-message
+    via ``os.getenv``, so the runtime flip takes effect immediately on the
+    background gateway thread.
+    """
+    # bot_chat's fixture setup already ran (/new was accepted under the
+    # normal allow-all).  Now revoke access for the duration of this test.
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("TELEGRAM_ALLOW_ALL_USERS", "false")
+    # Clear any allowlists that might bypass the deny: empty strings are
+    # treated as "unset" by the auth check (.strip() -> falsy).
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "")
+    monkeypatch.setenv("GATEWAY_ALLOWED_USERS", "")
+
+    reply = await bot_chat.send_and_expect("/help", timeout=30.0)
+
+    # /help output starts with "Hermes Commands" — if we see that, auth
+    # wasn't actually revoked and the test is invalid.
+    assert "Hermes Commands" not in reply, (
+        f"auth revocation didn't take effect — bot still answered /help. "
+        f"Got: {reply!r}"
+    )
+    assert "pairing code" in reply.lower(), (
+        f"expected pairing-code prompt for unauthorized user. Got: {reply!r}"
+    )
+    assert "hermes pairing approve" in reply.lower(), (
+        f"pairing reply should mention the approve command. Got: {reply!r}"
     )
 
 
