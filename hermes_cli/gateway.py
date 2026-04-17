@@ -222,7 +222,7 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
                     current_cmd = ""
         else:
             result = subprocess.run(
-                ["ps", "eww", "-ax", "-o", "pid=,command="],
+                ["ps", "-A", "eww", "-o", "pid=,command="],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -715,12 +715,23 @@ def _detect_venv_dir() -> Path | None:
     """Detect the active virtualenv directory.
 
     Checks ``sys.prefix`` first (works regardless of the directory name),
-    then falls back to probing common directory names under PROJECT_ROOT.
+    then ``VIRTUAL_ENV`` env var (covers uv-managed environments where
+    sys.prefix == sys.base_prefix), then falls back to probing common
+    directory names under PROJECT_ROOT.
     Returns ``None`` when no virtualenv can be found.
     """
     # If we're running inside a virtualenv, sys.prefix points to it.
     if sys.prefix != sys.base_prefix:
         venv = Path(sys.prefix)
+        if venv.is_dir():
+            return venv
+
+    # uv and some other tools set VIRTUAL_ENV without changing sys.prefix.
+    # This catches `uv run` where sys.prefix == sys.base_prefix but the
+    # environment IS a venv.  (#8620)
+    _virtual_env = os.environ.get("VIRTUAL_ENV")
+    if _virtual_env:
+        venv = Path(_virtual_env)
         if venv.is_dir():
             return venv
 
@@ -1128,7 +1139,62 @@ def systemd_restart(system: bool = False):
 
     pid = get_running_pid()
     if pid is not None and _request_gateway_self_restart(pid):
-        print(f"✓ {_service_scope_label(system).capitalize()} service restart requested")
+        # SIGUSR1 sent — the gateway will drain active agents, exit with
+        # code 75, and systemd will restart it after RestartSec (30s).
+        # Wait for the old process to die and the new one to become active
+        # so the CLI doesn't return while the service is still restarting.
+        import time
+        scope_label = _service_scope_label(system).capitalize()
+        svc = get_service_name()
+        scope_cmd = _systemctl_cmd(system)
+
+        # Phase 1: wait for old process to exit (drain + shutdown)
+        print(f"⏳ {scope_label} service draining active work...")
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(1)
+            except (ProcessLookupError, PermissionError):
+                break  # old process is gone
+        else:
+            print(f"⚠ Old process (PID {pid}) still alive after 90s")
+
+        # Phase 2: wait for systemd to start the new process
+        print(f"⏳ Waiting for {svc} to restart...")
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                result = subprocess.run(
+                    scope_cmd + ["is-active", svc],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.stdout.strip() == "active":
+                    # Verify it's a NEW process, not the old one somehow
+                    new_pid = get_running_pid()
+                    if new_pid and new_pid != pid:
+                        print(f"✓ {scope_label} service restarted (PID {new_pid})")
+                        return
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+            time.sleep(2)
+
+        # Timed out — check final state
+        try:
+            result = subprocess.run(
+                scope_cmd + ["is-active", svc],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip() == "active":
+                print(f"✓ {scope_label} service restarted")
+                return
+        except Exception:
+            pass
+        print(
+            f"⚠ {scope_label} service did not become active within 60s.\n"
+            f"  Check status: {'sudo ' if system else ''}hermes gateway status\n"
+            f"  Check logs:   journalctl {'--user ' if not system else ''}-u {svc} --since '2 min ago'"
+        )
         return
     _run_systemctl(["reload-or-restart", get_service_name()], system=system, check=True, timeout=90)
     print(f"✓ {_service_scope_label(system).capitalize()} service restarted")
@@ -1634,7 +1700,7 @@ _PLATFORMS = [
             "   Create an App-Level Token with scope: connections:write → copy xapp-... token",
             "3. Add Bot Token Scopes: Features → OAuth & Permissions → Scopes",
             "   Required: chat:write, app_mentions:read, channels:history, channels:read,",
-            "   groups:history, im:history, im:read, im:write, users:read, files:write",
+            "   groups:history, im:history, im:read, im:write, users:read, files:read, files:write",
             "4. Subscribe to Events: Features → Event Subscriptions → Enable",
             "   Required events: message.im, message.channels, app_mention",
             "   Optional: message.groups (for private channels)",
@@ -1913,6 +1979,29 @@ _PLATFORMS = [
              "help": "Phone number or Apple ID to deliver cron results and notifications to."},
         ],
     },
+    {
+        "key": "qqbot",
+        "label": "QQ Bot",
+        "emoji": "🐧",
+        "token_var": "QQ_APP_ID",
+        "setup_instructions": [
+            "1. Register a QQ Bot application at q.qq.com",
+            "2. Note your App ID and App Secret from the application page",
+            "3. Enable the required intents (C2C, Group, Guild messages)",
+            "4. Configure sandbox or publish the bot",
+        ],
+        "vars": [
+            {"name": "QQ_APP_ID", "prompt": "QQ Bot App ID", "password": False,
+             "help": "Your QQ Bot App ID from q.qq.com."},
+            {"name": "QQ_CLIENT_SECRET", "prompt": "QQ Bot App Secret", "password": True,
+             "help": "Your QQ Bot App Secret from q.qq.com."},
+            {"name": "QQ_ALLOWED_USERS", "prompt": "Allowed user OpenIDs (comma-separated, leave empty for open access)", "password": False,
+             "is_allowlist": True,
+             "help": "Optional — restrict DM access to specific user OpenIDs."},
+            {"name": "QQ_HOME_CHANNEL", "prompt": "Home channel (user/group OpenID for cron delivery, or empty)", "password": False,
+             "help": "OpenID to deliver cron results and notifications to."},
+        ],
+    },
 ]
 
 
@@ -2122,9 +2211,62 @@ def _setup_sms():
 
 
 def _setup_dingtalk():
-    """Configure DingTalk via the standard platform setup."""
+    """Configure DingTalk — QR scan (recommended) or manual credential entry."""
+    from hermes_cli.setup import (
+        prompt_choice, prompt_yes_no, print_info, print_success, print_warning,
+    )
+
     dingtalk_platform = next(p for p in _PLATFORMS if p["key"] == "dingtalk")
-    _setup_standard_platform(dingtalk_platform)
+    emoji = dingtalk_platform["emoji"]
+    label = dingtalk_platform["label"]
+
+    print()
+    print(color(f"  ─── {emoji} {label} Setup ───", Colors.CYAN))
+
+    existing = get_env_value("DINGTALK_CLIENT_ID")
+    if existing:
+        print()
+        print_success(f"{label} is already configured (Client ID: {existing}).")
+        if not prompt_yes_no(f"  Reconfigure {label}?", False):
+            return
+
+    print()
+    method = prompt_choice(
+        "  Choose setup method",
+        [
+            "QR Code Scan (Recommended, auto-obtain Client ID and Client Secret)",
+            "Manual Input (Client ID and Client Secret)",
+        ],
+        default=0,
+    )
+
+    if method == 0:
+        # ── QR-code device-flow authorization ──
+        try:
+            from hermes_cli.dingtalk_auth import dingtalk_qr_auth
+        except ImportError as exc:
+            print_warning(f"  QR auth module failed to load ({exc}), falling back to manual input.")
+            _setup_standard_platform(dingtalk_platform)
+            return
+
+        result = dingtalk_qr_auth()
+        if result is None:
+            print_warning("  QR auth incomplete, falling back to manual input.")
+            _setup_standard_platform(dingtalk_platform)
+            return
+
+        client_id, client_secret = result
+        save_env_value("DINGTALK_CLIENT_ID", client_id)
+        save_env_value("DINGTALK_CLIENT_SECRET", client_secret)
+        save_env_value("DINGTALK_ALLOW_ALL_USERS", "true")
+        print()
+        print_success(f"{emoji} {label} configured via QR scan!")
+    else:
+        # ── Manual entry ──
+        _setup_standard_platform(dingtalk_platform)
+        # Also enable allow-all by default for convenience
+        if get_env_value("DINGTALK_CLIENT_ID"):
+            save_env_value("DINGTALK_ALLOW_ALL_USERS", "true")
 
 
 def _setup_wecom():
@@ -2660,6 +2802,8 @@ def gateway_setup():
             _setup_signal()
         elif platform["key"] == "weixin":
             _setup_weixin()
+        elif platform["key"] == "dingtalk":
+            _setup_dingtalk()
         elif platform["key"] == "feishu":
             _setup_feishu()
         else:
@@ -2841,6 +2985,15 @@ def gateway_command(args):
 
     elif subcmd == "start":
         system = getattr(args, 'system', False)
+        start_all = getattr(args, 'all', False)
+
+        if start_all:
+            # Kill all stale gateway processes across all profiles before starting
+            killed = kill_gateway_processes(all_profiles=True)
+            if killed:
+                print(f"✓ Killed {killed} stale gateway process(es) across all profiles")
+                _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+
         if is_termux():
             print("Gateway service start is not supported on Termux because there is no system service manager.")
             print("Run manually: hermes gateway")
@@ -2926,7 +3079,39 @@ def gateway_command(args):
         # Try service first, fall back to killing and restarting
         service_available = False
         system = getattr(args, 'system', False)
+        restart_all = getattr(args, 'all', False)
         service_configured = False
+
+        if restart_all:
+            # --all: stop every gateway process across all profiles, then start fresh
+            service_stopped = False
+            if supports_systemd_services() and (get_systemd_unit_path(system=False).exists() or get_systemd_unit_path(system=True).exists()):
+                try:
+                    systemd_stop(system=system)
+                    service_stopped = True
+                except subprocess.CalledProcessError:
+                    pass
+            elif is_macos() and get_launchd_plist_path().exists():
+                try:
+                    launchd_stop()
+                    service_stopped = True
+                except subprocess.CalledProcessError:
+                    pass
+            killed = kill_gateway_processes(all_profiles=True)
+            total = killed + (1 if service_stopped else 0)
+            if total:
+                print(f"✓ Stopped {total} gateway process(es) across all profiles")
+            _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+
+            # Start the current profile's service fresh
+            print("Starting gateway...")
+            if supports_systemd_services() and (get_systemd_unit_path(system=False).exists() or get_systemd_unit_path(system=True).exists()):
+                systemd_start(system=system)
+            elif is_macos() and get_launchd_plist_path().exists():
+                launchd_start()
+            else:
+                run_gateway(verbose=0)
+            return
         
         if supports_systemd_services() and (get_systemd_unit_path(system=False).exists() or get_systemd_unit_path(system=True).exists()):
             service_configured = True
