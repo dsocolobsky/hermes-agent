@@ -187,6 +187,32 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 
 ### Provider & Model Issues
 
+#### `/model` only shows one provider / can't switch providers
+
+**Cause:** `/model` (inside a chat session) can only switch between providers you've **already configured**. If you've only set up OpenRouter, that's all `/model` will show.
+
+**Solution:** Exit your session and use `hermes model` from your terminal to add new providers:
+
+```bash
+# Exit the Hermes chat session first (Ctrl+C or /quit)
+
+# Run the full provider setup wizard
+hermes model
+
+# This lets you: add providers, run OAuth, enter API keys, configure endpoints
+```
+
+After adding a new provider via `hermes model`, start a new chat session — `/model` will now show all your configured providers.
+
+:::tip Quick reference
+| Want to... | Use |
+|-----------|-----|
+| Add a new provider | `hermes model` (from terminal) |
+| Enter/change API keys | `hermes model` (from terminal) |
+| Switch model mid-session | `/model <name>` (inside session) |
+| Switch to different configured provider | `/model provider:model` (inside session) |
+:::
+
 #### API key not working
 
 **Cause:** Key is missing, expired, incorrectly set, or for the wrong provider.
@@ -374,6 +400,42 @@ lsof -i :8080
 # Verify configuration
 hermes config show
 ```
+
+#### WSL: Gateway keeps disconnecting or `hermes gateway start` fails
+
+**Cause:** WSL's systemd support is unreliable. Many WSL2 installations don't have systemd enabled, and even when enabled, services may not survive WSL restarts or Windows idle shutdowns.
+
+**Solution:** Use foreground mode instead of the systemd service:
+
+```bash
+# Option 1: Direct foreground (simplest)
+hermes gateway run
+
+# Option 2: Persistent via tmux (survives terminal close)
+tmux new -s hermes 'hermes gateway run'
+# Reattach later: tmux attach -t hermes
+
+# Option 3: Background via nohup
+nohup hermes gateway run > ~/.hermes/logs/gateway.log 2>&1 &
+```
+
+If you want to try systemd anyway, make sure it's enabled:
+
+1. Open `/etc/wsl.conf` (create it if it doesn't exist)
+2. Add:
+   ```ini
+   [boot]
+   systemd=true
+   ```
+3. From PowerShell: `wsl --shutdown`
+4. Reopen your WSL terminal
+5. Verify: `systemctl is-system-running` should say "running" or "degraded"
+
+:::tip Auto-start on Windows boot
+For reliable auto-start, use Windows Task Scheduler to launch WSL + the gateway on login:
+1. Create a task that runs `wsl -d Ubuntu -- bash -lc 'hermes gateway run'`
+2. Set it to trigger on user logon
+:::
 
 #### macOS: Node.js / ffmpeg / other tools not found by gateway
 
